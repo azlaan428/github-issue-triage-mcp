@@ -13,6 +13,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
+from .classifier import Label, classify_issue
 from .github_client import MissingGitHubTokenError, build_github_client
 
 __all__ = [
@@ -24,6 +25,8 @@ __all__ = [
     "GitHubAPIError",
     "Issue",
     "list_issues",
+    "LabelResult",
+    "classify_and_label_issue",
 ]
 
 IssueState = Literal["open", "closed", "all"]
@@ -71,6 +74,13 @@ class Issue(BaseModel):
     labels: list[str]
     assignee: str | None
     url: str
+
+
+class LabelResult(BaseModel):
+    """The outcome of triaging one issue: which label was classified+applied."""
+
+    issue_number: int
+    label: str
 
 
 def _parse_repo(repo: str) -> tuple[str, str]:
@@ -133,3 +143,60 @@ def list_issues(repo: str, state: IssueState = "open") -> list[Issue]:
             )
         )
     return issues
+
+
+@mcp.tool()
+def classify_and_label_issue(repo: str, issue_number: int) -> LabelResult:
+    """Classify a GitHub issue as bug/feature/question and apply that label.
+
+    Fetches the issue, runs the pure keyword :func:`classify_issue` heuristic
+    over its title and body, then POSTs the matching label back to GitHub.
+
+    Args:
+        repo: The repository identifier in ``owner/repo`` form.
+        issue_number: The issue's number within the repository.
+
+    Returns the issue number and the label that was applied. A GitHub
+    API/auth/network failure on either the fetch or the label POST raises
+    :class:`GitHubAPIError` rather than silently succeeding; a malformed
+    ``repo`` raises :class:`ValueError`. The three default labels (``bug``,
+    ``feature``, ``question``) are assumed to exist on the repo — a missing
+    label surfaces from GitHub as a :class:`GitHubAPIError`.
+    """
+    owner, name = _parse_repo(repo)
+    client = github_client()
+
+    try:
+        response = client.get(f"/repos/{owner}/{name}/issues/{issue_number}")
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise GitHubAPIError(
+            f"GitHub API request for issue #{issue_number} in '{repo}' failed "
+            f"with status {exc.response.status_code}: {exc.response.text}"
+        ) from exc
+    except httpx.RequestError as exc:
+        raise GitHubAPIError(
+            f"GitHub API request for issue #{issue_number} in '{repo}' failed: {exc}"
+        ) from exc
+
+    item = response.json()
+    label: Label = classify_issue(item.get("title") or "", item.get("body"))
+
+    try:
+        applied = client.post(
+            f"/repos/{owner}/{name}/issues/{issue_number}/labels",
+            json={"labels": [label]},
+        )
+        applied.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise GitHubAPIError(
+            f"GitHub API request to label issue #{issue_number} in '{repo}' "
+            f"failed with status {exc.response.status_code}: {exc.response.text}"
+        ) from exc
+    except httpx.RequestError as exc:
+        raise GitHubAPIError(
+            f"GitHub API request to label issue #{issue_number} in '{repo}' "
+            f"failed: {exc}"
+        ) from exc
+
+    return LabelResult(issue_number=issue_number, label=label)
