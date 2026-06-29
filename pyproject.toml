@@ -3,7 +3,16 @@ name = "github_issue_triage_mcp"
 version = "0.0.0"
 description = "Scaffolded by keelen."
 requires-python = ">=3.11"
-dependencies = []
+# GitHub client library is `httpx` (talking to the GitHub REST API directly):
+# it is lightweight, already a transitive dependency of `mcp`, and makes the
+# authenticated client trivial to construct and assert on in tests.
+dependencies = [
+    "mcp>=1.28",
+    "httpx>=0.28",
+]
+
+[project.scripts]
+github-issue-triage-mcp = "github_issue_triage_mcp.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
